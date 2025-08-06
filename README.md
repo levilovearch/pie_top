@@ -1,6 +1,6 @@
 # Pie_top
 A way to (just) look at your trading 212 pies.
-![Pie Top Screenshot](./Gemini_Generated_Image.png)
+![Pie Top Screenshot](./image.png)
 ## Setup
 1. Get your trading212 api key (For safety, make it read-only)
 2. Create a ```.env``` file like below
