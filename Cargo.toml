@@ -13,5 +13,6 @@ chrono = { version = "0.4", features = ["serde", "std"] }
 eframe = "0.28"
 egui = "0.28"
 egui_extras = { version = "0.28", features = ["all_loaders"] }
+egui_plot = "0.28"
 tokio-stream = "0.1"
 

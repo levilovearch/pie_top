@@ -1,5 +1,5 @@
 use dotenv::dotenv;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::env;
 use std::fs::File;
@@ -8,8 +8,10 @@ use std::io::{Read, Write};
 use tokio::sync::Mutex;
 use std::time::Duration;
 use std::error::Error;
+use chrono::Utc;
 
 use eframe::egui;
+use egui_plot::{Line, Plot, PlotPoints};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -58,11 +60,19 @@ struct Setting {
     creation_date: f64,
 }
 
+#[derive(Debug, Clone)]
+struct TotalValuePoint {
+    timestamp: f64, // Unix timestamp in seconds
+    total_value: f64,
+}
+
 struct PieTopApp {
     pies: Arc<Mutex<HashMap<usize, Pie>>>,
     token: String,
     last_update: std::time::Instant,
     update_interval: Duration,
+    total_value_history: VecDeque<TotalValuePoint>,
+    pie_list_height: f32, // Height allocated to pie list section
 }
 
 impl PieTopApp {
@@ -72,6 +82,8 @@ impl PieTopApp {
             token,
             last_update: std::time::Instant::now(),
             update_interval: Duration::from_secs(5), 
+            total_value_history: VecDeque::new(),
+            pie_list_height: 300.0, // Default height for pie list section
         }
     }
 }
@@ -91,10 +103,48 @@ impl eframe::App for PieTopApp {
             });
             
             self.last_update = std::time::Instant::now();
+            
+            // Update total value history when we fetch new data
+            let pies_data = if let Ok(pies_guard) = self.pies.try_lock() {
+                pies_guard.values().cloned().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            
+            if !pies_data.is_empty() {
+                let total_now: f64 = pies_data.iter().map(|p| p.result.price_avg_value).sum();
+                let current_time = Utc::now().timestamp() as f64;
+                
+                // Add current total value to history
+                self.total_value_history.push_back(TotalValuePoint {
+                    timestamp: current_time,
+                    total_value: total_now,
+                });
+                
+                // Remove data older than 10 minutes (600 seconds)
+                let ten_minutes_ago = current_time - 600.0;
+                while let Some(front) = self.total_value_history.front() {
+                    if front.timestamp < ten_minutes_ago {
+                        self.total_value_history.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🥧 Pie Portfolio Dashboard");
+            // Top bar with title and status
+            ui.horizontal(|ui| {
+                ui.heading("🥧 Pie Portfolio Dashboard");
+                
+                // Push status to the right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!("Last update: {:.0}s ago", self.last_update.elapsed().as_secs_f32()));
+                    ui.separator();
+                    ui.label("🔄 Auto-refresh every 30 seconds");
+                });
+            });
             ui.separator();
 
             // Try to get pies data without blocking
@@ -144,69 +194,118 @@ impl eframe::App for PieTopApp {
 
             ui.separator();
 
-            // Pies table
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("pies_grid")
-                    .num_columns(7)
-                    .spacing([10.0, 8.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        // Header
-                        ui.heading("ID");
-                        ui.heading("Initial Value");
-                        ui.heading("Current Value");
-                        ui.heading("Return %");
-                        ui.heading("Progress %");
-                        ui.heading("Annual Rate %");
-                        ui.heading("Status");
-                        ui.end_row();
+            // Create a resizable layout between pie list and chart
+            let available_height = ui.available_height() - 100.0; // Leave some space for footer
+            
+            egui::TopBottomPanel::top("pie_list_panel")
+                .resizable(true)
+                .default_height(self.pie_list_height)
+                .height_range(150.0..=available_height - 150.0)
+                .show_inside(ui, |ui| {
+                    // Pies table with scroll bar
+                    ui.group(|ui| {
+                        ui.label("📊 Pie Holdings");
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false]) // Don't shrink
+                            .show(ui, |ui| {
+                            egui::Grid::new("pies_grid")
+                                .num_columns(7)
+                                .spacing([10.0, 8.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                // Header
+                                ui.heading("ID");
+                                ui.heading("Initial Value");
+                                ui.heading("Current Value");
+                                ui.heading("Return %");
+                                ui.heading("Progress %");
+                                ui.heading("Annual Rate %");
+                                ui.heading("Status");
+                                ui.end_row();
 
-                        // Pie rows
-                        for pie in &pies_data {
-                            let result_percent = pie.result.price_avg_result_coef * 100.0;
-                            let progress = pie.progress.unwrap_or(0.0) * 100.0;
-                            let annual_rate = calculate_annual_rate(
-                                pie.result.price_avg_invested_value,
-                                pie.result.price_avg_value,
-                                pie.created_at.unwrap_or_default() as f64,
-                            );
+                                // Pie rows
+                                for pie in &pies_data {
+                                    let result_percent = pie.result.price_avg_result_coef * 100.0;
+                                    let progress = pie.progress.unwrap_or(0.0) * 100.0;
+                                    let annual_rate = calculate_annual_rate(
+                                        pie.result.price_avg_invested_value,
+                                        pie.result.price_avg_value,
+                                        pie.created_at.unwrap_or_default() as f64,
+                                    );
 
-                            ui.label(pie.id.to_string());
-                            ui.label(format!("${:.2}", pie.result.price_avg_invested_value));
-                            ui.label(format!("${:.2}", pie.result.price_avg_value));
-                            
-                            let return_color = if result_percent > 0.0 {
-                                egui::Color32::GREEN
-                            } else if result_percent < 0.0 {
-                                egui::Color32::RED
-                            } else {
-                                egui::Color32::WHITE
-                            };
-                            ui.colored_label(return_color, format!("{:+.2}%", result_percent));
-                            
-                            ui.label(format!("{:.1}%", progress));
-                            
-                            let annual_color = if annual_rate > 0.0 {
-                                egui::Color32::GREEN
-                            } else if annual_rate < 0.0 {
-                                egui::Color32::RED
-                            } else {
-                                egui::Color32::WHITE
-                            };
-                            ui.colored_label(annual_color, format!("{:.2}%", annual_rate));
-                            
-                            ui.label(pie.status.as_deref().unwrap_or("Active"));
-                            ui.end_row();
-                        }
+                                    ui.label(pie.id.to_string());
+                                    ui.label(format!("${:.2}", pie.result.price_avg_invested_value));
+                                    ui.label(format!("${:.2}", pie.result.price_avg_value));
+                                    
+                                    let return_color = if result_percent > 0.0 {
+                                        egui::Color32::GREEN
+                                    } else if result_percent < 0.0 {
+                                        egui::Color32::RED
+                                    } else {
+                                        egui::Color32::WHITE
+                                    };
+                                    ui.colored_label(return_color, format!("{:+.2}%", result_percent));
+                                    
+                                    ui.label(format!("{:.1}%", progress));
+                                    
+                                    let annual_color = if annual_rate > 0.0 {
+                                        egui::Color32::GREEN
+                                    } else if annual_rate < 0.0 {
+                                        egui::Color32::RED
+                                    } else {
+                                        egui::Color32::WHITE
+                                    };
+                                    ui.colored_label(annual_color, format!("{:.2}%", annual_rate));
+                                    
+                                    ui.label(pie.status.as_deref().unwrap_or("Active"));
+                                    ui.end_row();
+                                }
+                            });
+                        });
                     });
+                    
+                    // Store the current height for next frame
+                    self.pie_list_height = ui.min_rect().height();
+                });
+
+            // Chart section in the remaining space
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                // Total Value Chart
+                ui.heading("📈 Total Value Change (Last 10 Minutes)");
+                
+                if self.total_value_history.len() >= 2 {
+                    // Use relative time in minutes from now as X-axis
+                    let current_time = Utc::now().timestamp() as f64;
+                    let plot_points: PlotPoints = self.total_value_history
+                        .iter()
+                        .map(|point| {
+                            let minutes_ago = (current_time - point.timestamp) / 60.0;
+                            [-minutes_ago, point.total_value] // Negative so current time is on the right
+                        })
+                        .collect();
+                    
+                    let line = Line::new(plot_points)
+                        .color(egui::Color32::from_rgb(70, 180, 220)) // Sky blue/greenish-blue
+                        .width(2.0)
+                        .name("Total Portfolio Value");
+                    
+                    Plot::new("total_value_plot")
+                        .width(ui.available_width())
+                        .height(ui.available_height() - 30.0) // Leave some space for the heading
+                        .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
+                        .x_axis_label("Time (Minutes Ago)")
+                        .y_axis_label("Total Value ($)")
+                        .include_x(-10.0) // Show 10 minutes ago
+                        .include_x(0.0)   // Show current time (0 minutes ago)
+                        .show_grid(false) // Disable grid
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(line);
+                        });
+                } else {
+                    ui.label("📊 Collecting data for chart... Need at least 2 data points");
+                }
             });
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("🔄 Auto-refresh every 30 seconds");
-                ui.separator();
-                ui.label(format!("Last update: {:.0}s ago", self.last_update.elapsed().as_secs_f32()));
-            });
         });
 
         // Request repaint for smooth updates
