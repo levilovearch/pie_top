@@ -12,6 +12,7 @@ use chrono::Utc;
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
+use egui_extras::{TableBuilder, Column};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -66,6 +67,28 @@ struct TotalValuePoint {
     total_value: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortColumn {
+    None,
+    InitialValue,
+    CurrentValue,
+    Return,
+    AnnualRate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TimeView {
+    TenMinutes,
+    OneHour,
+    OneDay,
+}
+
 struct PieTopApp {
     pies: Arc<Mutex<HashMap<usize, Pie>>>,
     token: String,
@@ -73,6 +96,9 @@ struct PieTopApp {
     update_interval: Duration,
     total_value_history: VecDeque<TotalValuePoint>,
     pie_list_height: f32, // Height allocated to pie list section
+    sort_column: SortColumn,
+    sort_direction: SortDirection,
+    time_view: TimeView,
 }
 
 impl PieTopApp {
@@ -84,6 +110,9 @@ impl PieTopApp {
             update_interval: Duration::from_secs(5), 
             total_value_history: VecDeque::new(),
             pie_list_height: 300.0, // Default height for pie list section
+            sort_column: SortColumn::None,
+            sort_direction: SortDirection::Descending,
+            time_view: TimeView::TenMinutes,
         }
     }
 }
@@ -121,10 +150,10 @@ impl eframe::App for PieTopApp {
                     total_value: total_now,
                 });
                 
-                // Remove data older than 10 minutes (600 seconds)
-                let ten_minutes_ago = current_time - 600.0;
+                // Remove data older than 1 day (86400 seconds) to keep memory usage reasonable
+                let one_day_ago = current_time - 86400.0;
                 while let Some(front) = self.total_value_history.front() {
-                    if front.timestamp < ten_minutes_ago {
+                    if front.timestamp < one_day_ago {
                         self.total_value_history.pop_front();
                     } else {
                         break;
@@ -142,13 +171,13 @@ impl eframe::App for PieTopApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!("Last update: {:.0}s ago", self.last_update.elapsed().as_secs_f32()));
                     ui.separator();
-                    ui.label("🔄 Auto-refresh every 30 seconds");
+                    ui.label("🔄 Auto-refresh every 5 seconds");
                 });
             });
             ui.separator();
 
             // Try to get pies data without blocking
-            let pies_data = if let Ok(pies_guard) = self.pies.try_lock() {
+            let mut pies_data = if let Ok(pies_guard) = self.pies.try_lock() {
                 pies_guard.values().cloned().collect::<Vec<_>>()
             } else {
                 Vec::new()
@@ -159,6 +188,59 @@ impl eframe::App for PieTopApp {
                 ui.label("Loading portfolio data...");
                 ctx.request_repaint_after(Duration::from_millis(100));
                 return;
+            }
+
+            // Sort pies data based on current sort settings
+            match self.sort_column {
+                SortColumn::InitialValue => {
+                    pies_data.sort_by(|a, b| {
+                        let a_initial = a.result.price_avg_invested_value;
+                        let b_initial = b.result.price_avg_invested_value;
+                        match self.sort_direction {
+                            SortDirection::Ascending => a_initial.partial_cmp(&b_initial).unwrap_or(std::cmp::Ordering::Equal),
+                            SortDirection::Descending => b_initial.partial_cmp(&a_initial).unwrap_or(std::cmp::Ordering::Equal),
+                        }
+                    });
+                }
+                SortColumn::CurrentValue => {
+                    pies_data.sort_by(|a, b| {
+                        let a_current = a.result.price_avg_value;
+                        let b_current = b.result.price_avg_value;
+                        match self.sort_direction {
+                            SortDirection::Ascending => a_current.partial_cmp(&b_current).unwrap_or(std::cmp::Ordering::Equal),
+                            SortDirection::Descending => b_current.partial_cmp(&a_current).unwrap_or(std::cmp::Ordering::Equal),
+                        }
+                    });
+                }
+                SortColumn::Return => {
+                    pies_data.sort_by(|a, b| {
+                        let a_return = a.result.price_avg_result_coef;
+                        let b_return = b.result.price_avg_result_coef;
+                        match self.sort_direction {
+                            SortDirection::Ascending => a_return.partial_cmp(&b_return).unwrap_or(std::cmp::Ordering::Equal),
+                            SortDirection::Descending => b_return.partial_cmp(&a_return).unwrap_or(std::cmp::Ordering::Equal),
+                        }
+                    });
+                }
+                SortColumn::AnnualRate => {
+                    pies_data.sort_by(|a, b| {
+                        let a_rate = calculate_annual_rate(
+                            a.result.price_avg_invested_value,
+                            a.result.price_avg_value,
+                            a.created_at.unwrap_or_default() as f64,
+                        );
+                        let b_rate = calculate_annual_rate(
+                            b.result.price_avg_invested_value,
+                            b.result.price_avg_value,
+                            b.created_at.unwrap_or_default() as f64,
+                        );
+                        match self.sort_direction {
+                            SortDirection::Ascending => a_rate.partial_cmp(&b_rate).unwrap_or(std::cmp::Ordering::Equal),
+                            SortDirection::Descending => b_rate.partial_cmp(&a_rate).unwrap_or(std::cmp::Ordering::Equal),
+                        }
+                    });
+                }
+                SortColumn::None => {} // No sorting
             }
 
             // Calculate totals
@@ -202,67 +284,221 @@ impl eframe::App for PieTopApp {
                 .default_height(self.pie_list_height)
                 .height_range(150.0..=available_height - 150.0)
                 .show_inside(ui, |ui| {
-                    // Pies table with scroll bar
-                    ui.group(|ui| {
-                        ui.label("📊 Pie Holdings");
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false]) // Don't shrink
-                            .show(ui, |ui| {
-                            egui::Grid::new("pies_grid")
-                                .num_columns(7)
-                                .spacing([10.0, 8.0])
-                                .striped(true)
-                                .show(ui, |ui| {
-                                // Header
-                                ui.heading("ID");
-                                ui.heading("Initial Value");
-                                ui.heading("Current Value");
-                                ui.heading("Return %");
-                                ui.heading("Progress %");
-                                ui.heading("Annual Rate %");
-                                ui.heading("Status");
-                                ui.end_row();
+                    // Pies table with full width
+                    ui.label("📊 Pie Holdings");
+                    
+                    TableBuilder::new(ui)
+                        .striped(true)
+                        .resizable(true)
+                        .vscroll(true) // Enable vertical scrolling within the table
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::remainder().range(40.0..=100.0)) // ID - uses remaining space proportionally
+                        .column(Column::remainder().range(80.0..=200.0)) // Initial Value
+                        .column(Column::remainder().range(80.0..=200.0)) // Current Value
+                        .column(Column::remainder().range(60.0..=150.0)) // Return %
+                        .column(Column::remainder().range(60.0..=150.0)) // Progress %
+                        .column(Column::remainder().range(80.0..=200.0)) // Annual Rate %
+                        .column(Column::remainder().range(60.0..=120.0)) // Status
+                                .header(25.0, |mut header| {
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        ui.strong("ID");
+                                    });
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        let initial_text = if self.sort_column == SortColumn::InitialValue {
+                                            match self.sort_direction {
+                                                SortDirection::Ascending => "Initial Value ↑",
+                                                SortDirection::Descending => "Initial Value ↓",
+                                            }
+                                        } else {
+                                            "Initial Value"
+                                        };
+                                        if ui.button(initial_text).clicked() {
+                                            if self.sort_column == SortColumn::InitialValue {
+                                                self.sort_direction = match self.sort_direction {
+                                                    SortDirection::Ascending => SortDirection::Descending,
+                                                    SortDirection::Descending => SortDirection::Ascending,
+                                                };
+                                            } else {
+                                                self.sort_column = SortColumn::InitialValue;
+                                                self.sort_direction = SortDirection::Descending;
+                                            }
+                                        }
+                                    });
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        let current_text = if self.sort_column == SortColumn::CurrentValue {
+                                            match self.sort_direction {
+                                                SortDirection::Ascending => "Current Value ↑",
+                                                SortDirection::Descending => "Current Value ↓",
+                                            }
+                                        } else {
+                                            "Current Value"
+                                        };
+                                        if ui.button(current_text).clicked() {
+                                            if self.sort_column == SortColumn::CurrentValue {
+                                                self.sort_direction = match self.sort_direction {
+                                                    SortDirection::Ascending => SortDirection::Descending,
+                                                    SortDirection::Descending => SortDirection::Ascending,
+                                                };
+                                            } else {
+                                                self.sort_column = SortColumn::CurrentValue;
+                                                self.sort_direction = SortDirection::Descending;
+                                            }
+                                        }
+                                    });
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        let return_text = if self.sort_column == SortColumn::Return {
+                                            match self.sort_direction {
+                                                SortDirection::Ascending => "Return % ↑",
+                                                SortDirection::Descending => "Return % ↓",
+                                            }
+                                        } else {
+                                            "Return %"
+                                        };
+                                        if ui.button(return_text).clicked() {
+                                            if self.sort_column == SortColumn::Return {
+                                                self.sort_direction = match self.sort_direction {
+                                                    SortDirection::Ascending => SortDirection::Descending,
+                                                    SortDirection::Descending => SortDirection::Ascending,
+                                                };
+                                            } else {
+                                                self.sort_column = SortColumn::Return;
+                                                self.sort_direction = SortDirection::Descending;
+                                            }
+                                        }
+                                    });
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        ui.strong("Progress %");
+                                    });
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        let annual_text = if self.sort_column == SortColumn::AnnualRate {
+                                            match self.sort_direction {
+                                                SortDirection::Ascending => "Annual Rate % ↑",
+                                                SortDirection::Descending => "Annual Rate % ↓",
+                                            }
+                                        } else {
+                                            "Annual Rate %"
+                                        };
+                                        if ui.button(annual_text).clicked() {
+                                            if self.sort_column == SortColumn::AnnualRate {
+                                                self.sort_direction = match self.sort_direction {
+                                                    SortDirection::Ascending => SortDirection::Descending,
+                                                    SortDirection::Descending => SortDirection::Ascending,
+                                                };
+                                            } else {
+                                                self.sort_column = SortColumn::AnnualRate;
+                                                self.sort_direction = SortDirection::Descending;
+                                            }
+                                        }
+                                    });
+                                    header.col(|ui| {
+                                        ui.style_mut().text_styles.insert(
+                                            egui::TextStyle::Body,
+                                            egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                        );
+                                        ui.strong("Status");
+                                    });
+                                })
+                                .body(|mut body| {
+                                    for pie in &pies_data {
+                                        let result_percent = pie.result.price_avg_result_coef * 100.0;
+                                        let progress = pie.progress.unwrap_or(0.0) * 100.0;
+                                        let annual_rate = calculate_annual_rate(
+                                            pie.result.price_avg_invested_value,
+                                            pie.result.price_avg_value,
+                                            pie.created_at.unwrap_or_default() as f64,
+                                        );
 
-                                // Pie rows
-                                for pie in &pies_data {
-                                    let result_percent = pie.result.price_avg_result_coef * 100.0;
-                                    let progress = pie.progress.unwrap_or(0.0) * 100.0;
-                                    let annual_rate = calculate_annual_rate(
-                                        pie.result.price_avg_invested_value,
-                                        pie.result.price_avg_value,
-                                        pie.created_at.unwrap_or_default() as f64,
-                                    );
-
-                                    ui.label(pie.id.to_string());
-                                    ui.label(format!("${:.2}", pie.result.price_avg_invested_value));
-                                    ui.label(format!("${:.2}", pie.result.price_avg_value));
-                                    
-                                    let return_color = if result_percent > 0.0 {
-                                        egui::Color32::GREEN
-                                    } else if result_percent < 0.0 {
-                                        egui::Color32::RED
-                                    } else {
-                                        egui::Color32::WHITE
-                                    };
-                                    ui.colored_label(return_color, format!("{:+.2}%", result_percent));
-                                    
-                                    ui.label(format!("{:.1}%", progress));
-                                    
-                                    let annual_color = if annual_rate > 0.0 {
-                                        egui::Color32::GREEN
-                                    } else if annual_rate < 0.0 {
-                                        egui::Color32::RED
-                                    } else {
-                                        egui::Color32::WHITE
-                                    };
-                                    ui.colored_label(annual_color, format!("{:.2}%", annual_rate));
-                                    
-                                    ui.label(pie.status.as_deref().unwrap_or("Active"));
-                                    ui.end_row();
-                                }
-                            });
-                        });
-                    });
+                                        body.row(22.0, |mut row| {
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                ui.label(pie.id.to_string());
+                                            });
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                ui.label(format!("${:.2}", pie.result.price_avg_invested_value));
+                                            });
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                ui.label(format!("${:.2}", pie.result.price_avg_value));
+                                            });
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                let return_color = if result_percent > 0.0 {
+                                                    egui::Color32::GREEN
+                                                } else if result_percent < 0.0 {
+                                                    egui::Color32::RED
+                                                } else {
+                                                    egui::Color32::WHITE
+                                                };
+                                                ui.colored_label(return_color, format!("{:+.2}%", result_percent));
+                                            });
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                ui.label(format!("{:.1}%", progress));
+                                            });
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                let annual_color = if annual_rate > 0.0 {
+                                                    egui::Color32::GREEN
+                                                } else if annual_rate < 0.0 {
+                                                    egui::Color32::RED
+                                                } else {
+                                                    egui::Color32::WHITE
+                                                };
+                                                ui.colored_label(annual_color, format!("{:.2}%", annual_rate));
+                                            });
+                                            row.col(|ui| {
+                                                ui.style_mut().text_styles.insert(
+                                                    egui::TextStyle::Body,
+                                                    egui::FontId::new(16.0, egui::FontFamily::Proportional)
+                                                );
+                                                ui.label(pie.status.as_deref().unwrap_or("Active"));
+                                            });
+                                        });
+                                    }
+                                });
                     
                     // Store the current height for next frame
                     self.pie_list_height = ui.min_rect().height();
@@ -270,37 +506,73 @@ impl eframe::App for PieTopApp {
 
             // Chart section in the remaining space
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                // Total Value Chart
-                ui.heading("📈 Total Value Change (Last 10 Minutes)");
+                // Total Value Chart with time view controls
+                ui.horizontal(|ui| {
+                    ui.heading("📈 Total Value Change");
+                    
+                    ui.separator();
+                    
+                    // Time view buttons
+                    ui.label("View:");
+                    if ui.selectable_label(self.time_view == TimeView::TenMinutes, "10m").clicked() {
+                        self.time_view = TimeView::TenMinutes;
+                    }
+                    if ui.selectable_label(self.time_view == TimeView::OneHour, "1h").clicked() {
+                        self.time_view = TimeView::OneHour;
+                    }
+                    if ui.selectable_label(self.time_view == TimeView::OneDay, "1d").clicked() {
+                        self.time_view = TimeView::OneDay;
+                    }
+                });
                 
                 if self.total_value_history.len() >= 2 {
-                    // Use relative time in minutes from now as X-axis
+                    // Filter data based on selected time view
                     let current_time = Utc::now().timestamp() as f64;
-                    let plot_points: PlotPoints = self.total_value_history
+                    let (cutoff_time, max_time_ago, x_label) = match self.time_view {
+                        TimeView::TenMinutes => (current_time - 600.0, 10.0, "Time (Minutes Ago)"),
+                        TimeView::OneHour => (current_time - 3600.0, 60.0, "Time (Minutes Ago)"),
+                        TimeView::OneDay => (current_time - 86400.0, 24.0, "Time (Hours Ago)"),
+                    };
+                    
+                    // Filter and convert data points
+                    let filtered_points: Vec<_> = self.total_value_history
                         .iter()
-                        .map(|point| {
-                            let minutes_ago = (current_time - point.timestamp) / 60.0;
-                            [-minutes_ago, point.total_value] // Negative so current time is on the right
-                        })
+                        .filter(|point| point.timestamp >= cutoff_time)
                         .collect();
                     
-                    let line = Line::new(plot_points)
-                        .color(egui::Color32::from_rgb(70, 180, 220)) // Sky blue/greenish-blue
-                        .width(2.0)
-                        .name("Total Portfolio Value");
-                    
-                    Plot::new("total_value_plot")
-                        .width(ui.available_width())
-                        .height(ui.available_height() - 30.0) // Leave some space for the heading
-                        .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
-                        .x_axis_label("Time (Minutes Ago)")
-                        .y_axis_label("Total Value ($)")
-                        .include_x(-10.0) // Show 10 minutes ago
-                        .include_x(0.0)   // Show current time (0 minutes ago)
-                        .show_grid(false) // Disable grid
-                        .show(ui, |plot_ui| {
-                            plot_ui.line(line);
-                        });
+                    if filtered_points.len() >= 2 {
+                        let plot_points: PlotPoints = filtered_points
+                            .iter()
+                            .map(|point| {
+                                let time_ago = current_time - point.timestamp;
+                                let x_value = match self.time_view {
+                                    TimeView::OneDay => -time_ago / 3600.0, // Hours ago
+                                    _ => -time_ago / 60.0, // Minutes ago
+                                };
+                                [x_value, point.total_value]
+                            })
+                            .collect();
+                        
+                        let line = Line::new(plot_points)
+                            .color(egui::Color32::from_rgb(70, 180, 220)) // Sky blue/greenish-blue
+                            .width(2.0)
+                            .name("Total Portfolio Value");
+                        
+                        Plot::new("total_value_plot")
+                            .width(ui.available_width())
+                            .height(ui.available_height() - 50.0) // Leave some space for the heading and buttons
+                            .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
+                            .x_axis_label(x_label)
+                            .y_axis_label("Total Value ($)")
+                            .include_x(-max_time_ago) // Show full time range
+                            .include_x(0.0)   // Show current time (0 minutes/hours ago)
+                            .show_grid(false) // Disable grid
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(line);
+                            });
+                    } else {
+                        ui.label("📊 Not enough data points for selected time range");
+                    }
                 } else {
                     ui.label("📊 Collecting data for chart... Need at least 2 data points");
                 }
