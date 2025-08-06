@@ -1,29 +1,16 @@
 use dotenv::dotenv;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{env, result};
+use std::env;
 use std::fs::File;
 use std::io::{Read, Write};
 
 use tokio::sync::Mutex;
 use std::time::Duration;
-use std::{error::Error, io};
-use tokio::sync::watch;
-use tokio::time::sleep;
+use std::error::Error;
 
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Terminal,
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    widgets::{Block, Borders, List, ListItem},
-};
-use serde::{de, Deserialize};
+use eframe::egui;
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 #[derive(serde::Serialize)]
@@ -43,17 +30,23 @@ struct Pie {
 struct DividendDetails {
     gained: f64,
     reinvested: f64,
-    inCash: f64,
+    #[serde(rename = "inCash")]
+    in_cash: f64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[derive(serde::Serialize)]
 struct ResultDetails {
-    priceAvgInvestedValue: f64,
-    priceAvgValue: f64,
-    priceAvgResult: f64,
-    priceAvgResultCoef: f64,
+    #[serde(rename = "priceAvgInvestedValue")]
+    price_avg_invested_value: f64,
+    #[serde(rename = "priceAvgValue")]
+    price_avg_value: f64,
+    #[serde(rename = "priceAvgResult")]
+    price_avg_result: f64,
+    #[serde(rename = "priceAvgResultCoef")]
+    price_avg_result_coef: f64,
 }
+
 #[derive(Debug, Deserialize, Clone)]
 struct PieDetail {
     settings: Setting
@@ -61,7 +54,164 @@ struct PieDetail {
 
 #[derive(Debug, Deserialize, Clone)]
 struct Setting {
-    creationDate: f64,
+    #[serde(rename = "creationDate")]
+    creation_date: f64,
+}
+
+struct PieTopApp {
+    pies: Arc<Mutex<HashMap<usize, Pie>>>,
+    token: String,
+    last_update: std::time::Instant,
+    update_interval: Duration,
+}
+
+impl PieTopApp {
+    fn new(token: String, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Self {
+        Self {
+            pies,
+            token,
+            last_update: std::time::Instant::now(),
+            update_interval: Duration::from_secs(5), 
+        }
+    }
+}
+
+impl eframe::App for PieTopApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Update data periodically
+        if self.last_update.elapsed() >= self.update_interval {
+            let token = self.token.clone();
+            let pies = self.pies.clone();
+            
+            // Spawn async task for fetching data
+            tokio::spawn(async move {
+                if let Err(e) = fetch_pies(&token, pies).await {
+                    eprintln!("Failed to fetch pies: {}", e);
+                }
+            });
+            
+            self.last_update = std::time::Instant::now();
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("🥧 Pie Portfolio Dashboard");
+            ui.separator();
+
+            // Try to get pies data without blocking
+            let pies_data = if let Ok(pies_guard) = self.pies.try_lock() {
+                pies_guard.values().cloned().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            if pies_data.is_empty() {
+                ui.spinner();
+                ui.label("Loading portfolio data...");
+                ctx.request_repaint_after(Duration::from_millis(100));
+                return;
+            }
+
+            // Calculate totals
+            let total_initial: f64 = pies_data.iter().map(|p| p.result.price_avg_invested_value).sum();
+            let total_now: f64 = pies_data.iter().map(|p| p.result.price_avg_value).sum();
+            let total_result_percent = if total_initial != 0.0 {
+                (total_now - total_initial) / total_initial * 100.0
+            } else {
+                0.0
+            };
+
+            // Summary section
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("📊 Portfolio Summary:");
+                    ui.separator();
+                    ui.label(format!("Initial: ${:.2}", total_initial));
+                    ui.separator();
+                    ui.label(format!("Current: ${:.2}", total_now));
+                    ui.separator();
+                    
+                    let color = if total_result_percent > 0.0 {
+                        egui::Color32::GREEN
+                    } else if total_result_percent < 0.0 {
+                        egui::Color32::RED
+                    } else {
+                        egui::Color32::WHITE
+                    };
+                    
+                    ui.colored_label(color, format!("Total Return: {:+.2}%", total_result_percent));
+                });
+            });
+
+            ui.separator();
+
+            // Pies table
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("pies_grid")
+                    .num_columns(7)
+                    .spacing([10.0, 8.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        // Header
+                        ui.heading("ID");
+                        ui.heading("Initial Value");
+                        ui.heading("Current Value");
+                        ui.heading("Return %");
+                        ui.heading("Progress %");
+                        ui.heading("Annual Rate %");
+                        ui.heading("Status");
+                        ui.end_row();
+
+                        // Pie rows
+                        for pie in &pies_data {
+                            let result_percent = pie.result.price_avg_result_coef * 100.0;
+                            let progress = pie.progress.unwrap_or(0.0) * 100.0;
+                            let annual_rate = calculate_annual_rate(
+                                pie.result.price_avg_invested_value,
+                                pie.result.price_avg_value,
+                                pie.created_at.unwrap_or_default() as f64,
+                            );
+
+                            ui.label(pie.id.to_string());
+                            ui.label(format!("${:.2}", pie.result.price_avg_invested_value));
+                            ui.label(format!("${:.2}", pie.result.price_avg_value));
+                            
+                            let return_color = if result_percent > 0.0 {
+                                egui::Color32::GREEN
+                            } else if result_percent < 0.0 {
+                                egui::Color32::RED
+                            } else {
+                                egui::Color32::WHITE
+                            };
+                            ui.colored_label(return_color, format!("{:+.2}%", result_percent));
+                            
+                            ui.label(format!("{:.1}%", progress));
+                            
+                            let annual_color = if annual_rate > 0.0 {
+                                egui::Color32::GREEN
+                            } else if annual_rate < 0.0 {
+                                egui::Color32::RED
+                            } else {
+                                egui::Color32::WHITE
+                            };
+                            ui.colored_label(annual_color, format!("{:.2}%", annual_rate));
+                            
+                            ui.label(pie.status.as_deref().unwrap_or("Active"));
+                            ui.end_row();
+                        }
+                    });
+            });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("🔄 Auto-refresh every 30 seconds");
+                ui.separator();
+                ui.label(format!("Last update: {:.0}s ago", self.last_update.elapsed().as_secs_f32()));
+            });
+        });
+
+        // Request repaint for smooth updates
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
 }
 
 
@@ -72,7 +222,6 @@ fn save_map(map: &HashMap<usize, Pie>, path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-
 fn load_map(path: &str) -> std::io::Result<HashMap<usize, Pie>> {
     let mut file = File::open(path)?;
     let mut data = String::new();
@@ -82,133 +231,50 @@ fn load_map(path: &str) -> std::io::Result<HashMap<usize, Pie>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), eframe::Error> {
     dotenv().ok();
-    let token = env::var("TRADE212_API_TOKEN")?;
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let token = env::var("TRADE212_API_TOKEN").expect("TRADE212_API_TOKEN must be set");
+    
+    // Load existing pies data
     let pies: Arc<Mutex<HashMap<usize, Pie>>> = Arc::new(Mutex::new(HashMap::new()));
     let pies_path = "pies.json";
     if let Ok(loaded_pies) = load_map(pies_path) {
-        let mut pies = pies.lock().await;
-        *pies = loaded_pies;
+        let mut pies_guard = pies.lock().await;
+        *pies_guard = loaded_pies;
     }
-    let pies_get = pies.clone();
-    // Spawn background fetch task
-    tokio::spawn(async move {
+
+    // Create the app
+    let app = PieTopApp::new(token, pies.clone());
+    
+    // Set up native options for the window
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Pie Portfolio Dashboard")
+            .with_inner_size([1200.0, 800.0])
+            .with_min_inner_size([800.0, 600.0]),
+        ..Default::default()
+    };
+
+    // Save pies data when app closes
+    let pies_for_save = pies.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1)); // Give some time for the app to start
         loop {
-            if let Ok(_) = fetch_pies(&token, pies_get.clone()).await {
-                // Successfully fetched pies
-            }
-            sleep(Duration::from_secs(2)).await;
-        }
-    });
-    let pies_g = pies.clone();
-    // Run the UI with the receiver
-    let res = run_app(&mut terminal, pies_g).await;
-    // Save pies to file
-    let pies_map = pies.lock().await;
-    if let Err(e) = save_map(&*pies_map, pies_path) {
-        eprintln!("Failed to save pies: {}", e);
-    }
-    // Clean up
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        eprintln!("Error: {}", err);
-    }
-    Ok(())
-}
-
-async fn run_app<B: Backend>(
-    terminal: &mut Terminal<B>,
-    pies: Arc<Mutex<HashMap<usize, Pie>>>,
-) -> Result<(), Box<dyn Error>> {
-
-    loop {
-        // Check if user pressed 'q' to quit
-        if event::poll(Duration::from_millis(10))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
+            std::thread::sleep(Duration::from_secs(5)); // Save every 5 seconds
+            if let Ok(pies_map) = pies_for_save.try_lock() {
+                if let Err(e) = save_map(&*pies_map, pies_path) {
+                    eprintln!("Failed to save pies: {}", e);
                 }
             }
         }
+    });
 
-        // Fetch new data every 2 seconds
-        let pies: Vec<Pie> = {
-            let pies_map = pies.lock().await;
-            pies_map.values().cloned().collect()
-        };
-
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints([Constraint::Min(1)].as_ref())
-                .split(f.size());
-            let mut total_initial = 0.0;
-            let mut total_now = 0.0;
-            let mut items: Vec<ListItem> = pies
-                .iter()
-                .map(|pie| {
-                    total_initial += pie.result.priceAvgInvestedValue;
-                    total_now += pie.result.priceAvgValue;
-                    let result_percent = pie.result.priceAvgResultCoef * 100.0;
-                    let progress = pie.progress.unwrap_or(0.0) * 100.0;
-                    let annual_rate = calculate_annual_rate(
-                        pie.result.priceAvgInvestedValue,
-                        pie.result.priceAvgValue,
-                        pie.created_at.unwrap_or_default() as f64,
-                    );
-
-                    let content = format!(
-                        "ID: {} | Initial: {:.2} | Now: {:.2} | Result: {:+.2}% | Progress: {:.1}% | Annual Rate: {:.2}%",
-                        pie.id,
-                        pie.result.priceAvgInvestedValue,
-                        pie.result.priceAvgValue,
-                        result_percent,
-                        progress,
-                        annual_rate,
-                    );
-                    let color = if result_percent > 0.0 {
-                        Color::Green
-                    } else if result_percent < 0.0 {
-                        Color::Red
-                    } else {
-                        Color::White
-                    };
-
-                    ListItem::new(content).style(Style::default().fg(color))
-                })
-                .collect();
-            items.push(ListItem::new(format!(
-                "Total Initial: {:.2} | Total Now: {:.2} | Total Result: {:+.2}%",
-                total_initial,
-                total_now,
-                if total_initial != 0.0 {
-                    (total_now - total_initial) / total_initial * 100.0
-                } else {
-                    0.0
-                },
-            )));
-            let list =
-                List::new(items).block(Block::default().title("Pie Status").borders(Borders::ALL));
-
-            f.render_widget(list, chunks[0]);
-        })?;
-    }
-
-    Ok(())
+    // Run the egui app
+    eframe::run_native(
+        "Pie Portfolio Dashboard",
+        native_options,
+        Box::new(|_cc| Ok(Box::new(app))),
+    )
 }
 
 async fn fetch_pies(token: &str, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Result<(), Box<dyn Error>> {
@@ -220,7 +286,52 @@ async fn fetch_pies(token: &str, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Resul
         .send()
         .await?;
     
-    let pies_v = response.json::<Vec<Pie>>().await?;
+    // Check the response status first
+    let status = response.status();
+    if !status.is_success() {
+        if status == 429 {
+            // Rate limited - just return without error to avoid spam
+            return Ok(());
+        }
+        eprintln!("API Error: HTTP Status {}", status);
+        let error_text = response.text().await?;
+        eprintln!("API Error Response: {}", error_text);
+        return Err(format!("HTTP Error: {} - {}", status, error_text).into());
+    }
+    
+    // Get the response as text to see the actual format
+    let response_text = response.text().await?;
+    
+    // Check if it's an error response first
+    if response_text.contains("BusinessException") || response_text.contains("error") {
+        return Err(format!("API Business Error: {}", response_text).into());
+    }
+    
+    // Try to parse as Vec<Pie> first (array format)
+    let pies_v = if let Ok(pies_array) = serde_json::from_str::<Vec<Pie>>(&response_text) {
+        pies_array
+    } else {
+        // If that fails, try to parse as an object with pies
+        #[derive(Deserialize)]
+        struct PiesResponse {
+            #[serde(flatten)]
+            pies: HashMap<String, Pie>,
+        }
+        
+        if let Ok(pies_obj) = serde_json::from_str::<PiesResponse>(&response_text) {
+            pies_obj.pies.into_values().collect()
+        } else {
+            // If both fail, try direct object parsing
+            match serde_json::from_str::<HashMap<String, Pie>>(&response_text) {
+                Ok(pies_map) => pies_map.into_values().collect(),
+                Err(e) => {
+                    eprintln!("Failed to parse JSON as any expected format: {}", e);
+                    eprintln!("Raw response: {}", response_text);
+                    return Err(e.into());
+                }
+            }
+        }
+    };
     
     for pie in pies_v {
         let pie_clone = pies.clone();
@@ -236,6 +347,7 @@ async fn fetch_pies(token: &str, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Resul
     }
     Ok(())
 }
+
 async fn get_create_date(pie: &Pie, client: &reqwest::Client, token: &str) -> Result<f64, Box<dyn Error>> {
     let url = "https://live.trading212.com/api/v0/equity/pies/".to_owned() + &pie.id.to_string(); // Replace with real Trade212 API endpoint
     let response = client
@@ -244,7 +356,7 @@ async fn get_create_date(pie: &Pie, client: &reqwest::Client, token: &str) -> Re
         .send()
         .await?;
     let pie_detail = response.json::<PieDetail>().await?;
-    Ok(pie_detail.settings.creationDate)
+    Ok(pie_detail.settings.creation_date)
 }
 
 fn calculate_annual_rate(
