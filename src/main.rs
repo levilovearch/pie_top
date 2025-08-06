@@ -26,6 +26,7 @@ struct Pie {
     progress: Option<f64>,
     status: Option<String>,
     created_at: Option<f64>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -59,6 +60,7 @@ struct PieDetail {
 struct Setting {
     #[serde(rename = "creationDate")]
     creation_date: f64,
+    name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +294,7 @@ impl eframe::App for PieTopApp {
                         .resizable(true)
                         .vscroll(true) // Enable vertical scrolling within the table
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                        .column(Column::remainder().range(40.0..=100.0)) // ID - uses remaining space proportionally
+                        .column(Column::remainder().range(120.0..=250.0)) // Name - wider column for pie names
                         .column(Column::remainder().range(80.0..=200.0)) // Initial Value
                         .column(Column::remainder().range(80.0..=200.0)) // Current Value
                         .column(Column::remainder().range(60.0..=150.0)) // Return %
@@ -305,7 +307,7 @@ impl eframe::App for PieTopApp {
                                             egui::TextStyle::Body,
                                             egui::FontId::new(16.0, egui::FontFamily::Proportional)
                                         );
-                                        ui.strong("ID");
+                                        ui.strong("Name");
                                     });
                                     header.col(|ui| {
                                         ui.style_mut().text_styles.insert(
@@ -438,7 +440,14 @@ impl eframe::App for PieTopApp {
                                                     egui::TextStyle::Body,
                                                     egui::FontId::new(16.0, egui::FontFamily::Proportional)
                                                 );
-                                                ui.label(pie.id.to_string());
+                                                let pie_name = pie.name.clone().unwrap_or_else(|| format!("Pie {}", pie.id));
+                                                
+                                                // Use truncated label that respects column width
+                                                let response = ui.add(
+                                                    egui::Label::new(&pie_name)
+                                                        .truncate() // Enable text truncation
+                                                );
+                                                response.on_hover_text(&pie_name); // Show full name on hover
                                             });
                                             row.col(|ui| {
                                                 ui.style_mut().text_styles.insert(
@@ -708,10 +717,15 @@ async fn fetch_pies(token: &str, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Resul
         let pie_clone = pies.clone();
         let mut p = pie_clone.lock().await;
         let p = p.entry(pie.id as usize).or_insert(pie.clone());
-        if p.created_at.is_none() {
-            // If created_at is None, fetch the creation date
-            if let Ok(create_date) = get_create_date(&pie, &client, token).await {
-                p.created_at = Some(create_date);
+        if p.created_at.is_none() || p.name.is_none() {
+            // If created_at or name is None, fetch the creation date and name
+            if let Ok((create_date, name)) = get_pie_details(&pie, &client, token).await {
+                if p.created_at.is_none() {
+                    p.created_at = Some(create_date);
+                }
+                if p.name.is_none() {
+                    p.name = Some(name);
+                }
             }
         }
         p.result = pie.result.clone();
@@ -719,7 +733,7 @@ async fn fetch_pies(token: &str, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Resul
     Ok(())
 }
 
-async fn get_create_date(pie: &Pie, client: &reqwest::Client, token: &str) -> Result<f64, Box<dyn Error>> {
+async fn get_pie_details(pie: &Pie, client: &reqwest::Client, token: &str) -> Result<(f64, String), Box<dyn Error>> {
     let url = "https://live.trading212.com/api/v0/equity/pies/".to_owned() + &pie.id.to_string(); // Replace with real Trade212 API endpoint
     let response = client
         .get(url)
@@ -727,7 +741,7 @@ async fn get_create_date(pie: &Pie, client: &reqwest::Client, token: &str) -> Re
         .send()
         .await?;
     let pie_detail = response.json::<PieDetail>().await?;
-    Ok(pie_detail.settings.creation_date)
+    Ok((pie_detail.settings.creation_date, pie_detail.settings.name))
 }
 
 fn calculate_annual_rate(
