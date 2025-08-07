@@ -75,6 +75,7 @@ enum SortColumn {
     InitialValue,
     CurrentValue,
     Return,
+    ReturnValue,
     AnnualRate,
 }
 
@@ -224,6 +225,16 @@ impl eframe::App for PieTopApp {
                         }
                     });
                 }
+                SortColumn::ReturnValue => {
+                    pies_data.sort_by(|a, b| {
+                        let a_return_value = a.result.price_avg_value - a.result.price_avg_invested_value;
+                        let b_return_value = b.result.price_avg_value - b.result.price_avg_invested_value;
+                        match self.sort_direction {
+                            SortDirection::Ascending => a_return_value.partial_cmp(&b_return_value).unwrap_or(std::cmp::Ordering::Equal),
+                            SortDirection::Descending => b_return_value.partial_cmp(&a_return_value).unwrap_or(std::cmp::Ordering::Equal),
+                        }
+                    });
+                }
                 SortColumn::AnnualRate => {
                     pies_data.sort_by(|a, b| {
                         let a_rate = calculate_annual_rate(
@@ -298,7 +309,7 @@ impl eframe::App for PieTopApp {
                         .column(Column::remainder().range(80.0..=200.0)) // Initial Value
                         .column(Column::remainder().range(80.0..=200.0)) // Current Value
                         .column(Column::remainder().range(60.0..=150.0)) // Return %
-                        .column(Column::remainder().range(60.0..=150.0)) // Progress %
+                        .column(Column::remainder().range(80.0..=200.0)) // Return Value
                         .column(Column::remainder().range(80.0..=200.0)) // Annual Rate %
                         .column(Column::remainder().range(60.0..=120.0)) // Status
                                 .header(25.0, |mut header| {
@@ -316,13 +327,13 @@ impl eframe::App for PieTopApp {
                                         );
                                         let initial_text = if self.sort_column == SortColumn::InitialValue {
                                             match self.sort_direction {
-                                                SortDirection::Ascending => "Initial Value ↑",
-                                                SortDirection::Descending => "Initial Value ↓",
+                                                SortDirection::Ascending => "Initial Value ⬆️",
+                                                SortDirection::Descending => "Initial Value ⬇️",
                                             }
                                         } else {
                                             "Initial Value"
                                         };
-                                        if ui.button(initial_text).clicked() {
+                                        if ui.add(egui::Button::new(egui::RichText::new(initial_text).strong())).clicked() {
                                             if self.sort_column == SortColumn::InitialValue {
                                                 self.sort_direction = match self.sort_direction {
                                                     SortDirection::Ascending => SortDirection::Descending,
@@ -341,13 +352,13 @@ impl eframe::App for PieTopApp {
                                         );
                                         let current_text = if self.sort_column == SortColumn::CurrentValue {
                                             match self.sort_direction {
-                                                SortDirection::Ascending => "Current Value ↑",
-                                                SortDirection::Descending => "Current Value ↓",
+                                                SortDirection::Ascending => "Current Value ⬆️",
+                                                SortDirection::Descending => "Current Value ⬇️",
                                             }
                                         } else {
                                             "Current Value"
                                         };
-                                        if ui.button(current_text).clicked() {
+                                        if ui.add(egui::Button::new(egui::RichText::new(current_text).strong())).clicked() {
                                             if self.sort_column == SortColumn::CurrentValue {
                                                 self.sort_direction = match self.sort_direction {
                                                     SortDirection::Ascending => SortDirection::Descending,
@@ -366,13 +377,13 @@ impl eframe::App for PieTopApp {
                                         );
                                         let return_text = if self.sort_column == SortColumn::Return {
                                             match self.sort_direction {
-                                                SortDirection::Ascending => "Return % ↑",
-                                                SortDirection::Descending => "Return % ↓",
+                                                SortDirection::Ascending => "Return % ⬆️",
+                                                SortDirection::Descending => "Return % ⬇️",
                                             }
                                         } else {
                                             "Return %"
                                         };
-                                        if ui.button(return_text).clicked() {
+                                        if ui.add(egui::Button::new(egui::RichText::new(return_text).strong())).clicked() {
                                             if self.sort_column == SortColumn::Return {
                                                 self.sort_direction = match self.sort_direction {
                                                     SortDirection::Ascending => SortDirection::Descending,
@@ -389,7 +400,25 @@ impl eframe::App for PieTopApp {
                                             egui::TextStyle::Body,
                                             egui::FontId::new(16.0, egui::FontFamily::Proportional)
                                         );
-                                        ui.strong("Progress %");
+                                        let return_value_text = if self.sort_column == SortColumn::ReturnValue {
+                                            match self.sort_direction {
+                                                SortDirection::Ascending => "Return Value ⬆️",
+                                                SortDirection::Descending => "Return Value ⬇️",
+                                            }
+                                        } else {
+                                            "Return Value"
+                                        };
+                                        if ui.add(egui::Button::new(egui::RichText::new(return_value_text).strong())).clicked() {
+                                            if self.sort_column == SortColumn::ReturnValue {
+                                                self.sort_direction = match self.sort_direction {
+                                                    SortDirection::Ascending => SortDirection::Descending,
+                                                    SortDirection::Descending => SortDirection::Ascending,
+                                                };
+                                            } else {
+                                                self.sort_column = SortColumn::ReturnValue;
+                                                self.sort_direction = SortDirection::Descending;
+                                            }
+                                        }
                                     });
                                     header.col(|ui| {
                                         ui.style_mut().text_styles.insert(
@@ -398,13 +427,13 @@ impl eframe::App for PieTopApp {
                                         );
                                         let annual_text = if self.sort_column == SortColumn::AnnualRate {
                                             match self.sort_direction {
-                                                SortDirection::Ascending => "Annual Rate % ↑",
-                                                SortDirection::Descending => "Annual Rate % ↓",
+                                                SortDirection::Ascending => "Annual Rate % ⬆️",
+                                                SortDirection::Descending => "Annual Rate % ⬇️",
                                             }
                                         } else {
                                             "Annual Rate %"
                                         };
-                                        if ui.button(annual_text).clicked() {
+                                        if ui.add(egui::Button::new(egui::RichText::new(annual_text).strong())).clicked() {
                                             if self.sort_column == SortColumn::AnnualRate {
                                                 self.sort_direction = match self.sort_direction {
                                                     SortDirection::Ascending => SortDirection::Descending,
@@ -427,7 +456,6 @@ impl eframe::App for PieTopApp {
                                 .body(|mut body| {
                                     for pie in &pies_data {
                                         let result_percent = pie.result.price_avg_result_coef * 100.0;
-                                        let progress = pie.progress.unwrap_or(0.0) * 100.0;
                                         let annual_rate = calculate_annual_rate(
                                             pie.result.price_avg_invested_value,
                                             pie.result.price_avg_value,
@@ -482,7 +510,15 @@ impl eframe::App for PieTopApp {
                                                     egui::TextStyle::Body,
                                                     egui::FontId::new(16.0, egui::FontFamily::Proportional)
                                                 );
-                                                ui.label(format!("{:.1}%", progress));
+                                                let return_value = pie.result.price_avg_value - pie.result.price_avg_invested_value;
+                                                let return_color = if return_value > 0.0 {
+                                                    egui::Color32::GREEN
+                                                } else if return_value < 0.0 {
+                                                    egui::Color32::RED
+                                                } else {
+                                                    egui::Color32::WHITE
+                                                };
+                                                ui.colored_label(return_color, format!("{:+.2}", return_value));
                                             });
                                             row.col(|ui| {
                                                 ui.style_mut().text_styles.insert(
