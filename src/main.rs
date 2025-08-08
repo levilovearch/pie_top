@@ -69,6 +69,14 @@ struct TotalValuePoint {
     total_value: f64,
 }
 
+#[derive(Debug, Clone)]
+struct PieValuePoint {
+    timestamp: f64, // Unix timestamp in seconds
+    pie_id: u64,
+    pie_name: String,
+    value: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SortColumn {
     None,
@@ -98,10 +106,12 @@ struct PieTopApp {
     last_update: std::time::Instant,
     update_interval: Duration,
     total_value_history: VecDeque<TotalValuePoint>,
+    pie_value_history: VecDeque<PieValuePoint>,
     pie_list_height: f32, // Height allocated to pie list section
     sort_column: SortColumn,
     sort_direction: SortDirection,
     time_view: TimeView,
+    selected_chart_pie: Option<u64>, // None = Total Portfolio, Some(id) = specific pie
 }
 
 impl PieTopApp {
@@ -112,10 +122,12 @@ impl PieTopApp {
             last_update: std::time::Instant::now(),
             update_interval: Duration::from_secs(5), 
             total_value_history: VecDeque::new(),
+            pie_value_history: VecDeque::new(),
             pie_list_height: 300.0, // Default height for pie list section
             sort_column: SortColumn::None,
             sort_direction: SortDirection::Descending,
             time_view: TimeView::TenMinutes,
+            selected_chart_pie: None, // Start with total portfolio selected
         }
     }
 }
@@ -153,11 +165,31 @@ impl eframe::App for PieTopApp {
                     total_value: total_now,
                 });
                 
+                // Add individual pie values to history
+                for pie in &pies_data {
+                    let pie_name = pie.name.clone().unwrap_or_else(|| format!("Pie {}", pie.id));
+                    self.pie_value_history.push_back(PieValuePoint {
+                        timestamp: current_time,
+                        pie_id: pie.id,
+                        pie_name,
+                        value: pie.result.price_avg_value,
+                    });
+                }
+                
                 // Remove data older than 1 day (86400 seconds) to keep memory usage reasonable
                 let one_day_ago = current_time - 86400.0;
                 while let Some(front) = self.total_value_history.front() {
                     if front.timestamp < one_day_ago {
                         self.total_value_history.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                
+                // Also clean up pie value history
+                while let Some(front) = self.pie_value_history.front() {
+                    if front.timestamp < one_day_ago {
+                        self.pie_value_history.pop_front();
                     } else {
                         break;
                     }
@@ -551,9 +583,48 @@ impl eframe::App for PieTopApp {
 
             // Chart section in the remaining space
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                // Total Value Chart with time view controls
+                // Portfolio Value Chart with time view controls
                 ui.horizontal(|ui| {
-                    ui.heading("📈 Total Value Change");
+                    ui.heading("📈 Portfolio Value Chart");
+                    
+                    ui.separator();
+                    
+                    // Pie selection dropdown
+                    ui.label("Show:");
+                    egui::ComboBox::from_label("")
+                        .selected_text(match self.selected_chart_pie {
+                            None => "Total Portfolio".to_string(),
+                            Some(pie_id) => {
+                                // Find the pie name from current data
+                                let pies_data = if let Ok(pies_guard) = self.pies.try_lock() {
+                                    pies_guard.values().cloned().collect::<Vec<_>>()
+                                } else {
+                                    Vec::new()
+                                };
+                                
+                                pies_data.iter()
+                                    .find(|p| p.id == pie_id)
+                                    .and_then(|p| p.name.as_ref())
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("Pie {}", pie_id))
+                            }
+                        })
+                        .show_ui(ui, |ui| {
+                            // Total Portfolio option
+                            ui.selectable_value(&mut self.selected_chart_pie, None, "Total Portfolio");
+                            
+                            // Individual pie options
+                            let pies_data = if let Ok(pies_guard) = self.pies.try_lock() {
+                                pies_guard.values().cloned().collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            };
+                            
+                            for pie in &pies_data {
+                                let pie_name = pie.name.clone().unwrap_or_else(|| format!("Pie {}", pie.id));
+                                ui.selectable_value(&mut self.selected_chart_pie, Some(pie.id), pie_name);
+                            }
+                        });
                     
                     ui.separator();
                     
@@ -579,44 +650,109 @@ impl eframe::App for PieTopApp {
                         TimeView::OneDay => (current_time - 86400.0, 24.0, "Time (Hours Ago)"),
                     };
                     
-                    // Filter and convert data points
-                    let filtered_points: Vec<_> = self.total_value_history
-                        .iter()
-                        .filter(|point| point.timestamp >= cutoff_time)
-                        .collect();
-                    
-                    if filtered_points.len() >= 2 {
-                        let plot_points: PlotPoints = filtered_points
-                            .iter()
-                            .map(|point| {
-                                let time_ago = current_time - point.timestamp;
-                                let x_value = match self.time_view {
-                                    TimeView::OneDay => -time_ago / 3600.0, // Hours ago
-                                    _ => -time_ago / 60.0, // Minutes ago
-                                };
-                                [x_value, point.total_value]
-                            })
-                            .collect();
-                        
-                        let line = Line::new(plot_points)
-                            .color(egui::Color32::from_rgb(70, 180, 220)) // Sky blue/greenish-blue
-                            .width(2.0)
-                            .name("Total Portfolio Value");
-                        
-                        Plot::new("total_value_plot")
-                            .width(ui.available_width())
-                            .height(ui.available_height() - 50.0) // Leave some space for the heading and buttons
-                            .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
-                            .x_axis_label(x_label)
-                            .y_axis_label("Total Value ($)")
-                            .include_x(-max_time_ago) // Show full time range
-                            .include_x(0.0)   // Show current time (0 minutes/hours ago)
-                            .show_grid(false) // Disable grid
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(line);
-                            });
-                    } else {
-                        ui.label("📊 Not enough data points for selected time range");
+                    match self.selected_chart_pie {
+                        None => {
+                            // Show total portfolio value
+                            let filtered_total_points: Vec<_> = self.total_value_history
+                                .iter()
+                                .filter(|point| point.timestamp >= cutoff_time)
+                                .collect();
+                            
+                            if filtered_total_points.len() >= 2 {
+                                let total_plot_points: PlotPoints = filtered_total_points
+                                    .iter()
+                                    .map(|point| {
+                                        let time_ago = current_time - point.timestamp;
+                                        let x_value = match self.time_view {
+                                            TimeView::OneDay => -time_ago / 3600.0, // Hours ago
+                                            _ => -time_ago / 60.0, // Minutes ago
+                                        };
+                                        [x_value, point.total_value]
+                                    })
+                                    .collect();
+                                
+                                // Calculate Y-axis bounds for better scaling
+                                let values: Vec<f64> = filtered_total_points.iter().map(|p| p.total_value).collect();
+                                let min_value = values.iter().copied().fold(f64::INFINITY, f64::min);
+                                let max_value = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                                let padding = (max_value - min_value) * 0.05; // 5% padding
+                                
+                                let total_line = Line::new(total_plot_points)
+                                    .color(egui::Color32::from_rgb(70, 180, 220)) // Sky blue
+                                    .width(3.0)
+                                    .name("Total Portfolio Value");
+                                
+                                Plot::new("portfolio_value_plot")
+                                    .width(ui.available_width())
+                                    .height(ui.available_height() - 50.0)
+                                    .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
+                                    .x_axis_label(x_label)
+                                    .y_axis_label("Value ($)")
+                                    .include_x(-max_time_ago)
+                                    .include_x(0.0)
+                                    .include_y(min_value - padding)
+                                    .include_y(max_value + padding)
+                                    .show_grid(false)
+                                    .show(ui, |plot_ui| {
+                                        plot_ui.line(total_line);
+                                    });
+                            } else {
+                                ui.label("📊 Not enough data points for selected time range");
+                            }
+                        }
+                        Some(selected_pie_id) => {
+                            // Show specific pie value
+                            let pie_points: Vec<_> = self.pie_value_history
+                                .iter()
+                                .filter(|point| point.pie_id == selected_pie_id && point.timestamp >= cutoff_time)
+                                .collect();
+                            
+                            if pie_points.len() >= 2 {
+                                let pie_plot_points: PlotPoints = pie_points
+                                    .iter()
+                                    .map(|point| {
+                                        let time_ago = current_time - point.timestamp;
+                                        let x_value = match self.time_view {
+                                            TimeView::OneDay => -time_ago / 3600.0, // Hours ago
+                                            _ => -time_ago / 60.0, // Minutes ago
+                                        };
+                                        [x_value, point.value]
+                                    })
+                                    .collect();
+                                
+                                // Calculate Y-axis bounds for better scaling
+                                let values: Vec<f64> = pie_points.iter().map(|p| p.value).collect();
+                                let min_value = values.iter().copied().fold(f64::INFINITY, f64::min);
+                                let max_value = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                                let padding = (max_value - min_value).max(1.0) * 0.05; // 5% padding, minimum 1.0
+                                
+                                let pie_name = pie_points.first()
+                                    .map(|p| p.pie_name.clone())
+                                    .unwrap_or_else(|| format!("Pie {}", selected_pie_id));
+                                
+                                let pie_line = Line::new(pie_plot_points)
+                                    .color(egui::Color32::from_rgb(220, 70, 180)) // Pink
+                                    .width(3.0)
+                                    .name(pie_name);
+                                
+                                Plot::new("portfolio_value_plot")
+                                    .width(ui.available_width())
+                                    .height(ui.available_height() - 50.0)
+                                    .legend(egui_plot::Legend::default().position(egui_plot::Corner::LeftTop))
+                                    .x_axis_label(x_label)
+                                    .y_axis_label("Value ($)")
+                                    .include_x(-max_time_ago)
+                                    .include_x(0.0)
+                                    .include_y(min_value - padding)
+                                    .include_y(max_value + padding)
+                                    .show_grid(false)
+                                    .show(ui, |plot_ui| {
+                                        plot_ui.line(pie_line);
+                                    });
+                            } else {
+                                ui.label("📊 Not enough data points for selected pie in the time range");
+                            }
+                        }
                     }
                 } else {
                     ui.label("📊 Collecting data for chart... Need at least 2 data points");
