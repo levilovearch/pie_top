@@ -1,5 +1,5 @@
 use dotenv::dotenv;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::env;
 use std::fs::File;
@@ -885,10 +885,26 @@ async fn fetch_pies(token: &str, pies: Arc<Mutex<HashMap<usize, Pie>>>) -> Resul
         }
     };
     
+    // Collect all pie IDs from the API response
+    let current_pie_ids: HashSet<usize> = pies_v.iter()
+        .map(|pie| pie.id as usize)
+        .collect();
+    
+    // Lock the pies HashMap once for all operations
+    let mut pies_map = pies.lock().await;
+    
+    // Remove pies that are no longer in the API response (deleted remotely)
+    let existing_pie_ids: Vec<usize> = pies_map.keys().cloned().collect();
+    for existing_id in existing_pie_ids {
+        if !current_pie_ids.contains(&existing_id) {
+            pies_map.remove(&existing_id);
+            println!("Removed deleted pie with ID: {}", existing_id);
+        }
+    }
+    
+    // Update or insert pies from the API response
     for pie in pies_v {
-        let pie_clone = pies.clone();
-        let mut p = pie_clone.lock().await;
-        let p = p.entry(pie.id as usize).or_insert(pie.clone());
+        let p = pies_map.entry(pie.id as usize).or_insert(pie.clone());
         if p.created_at.is_none() || p.name.is_none() {
             // If created_at or name is None, fetch the creation date and name
             if let Ok((create_date, name)) = get_pie_details(&pie, &client, token).await {
